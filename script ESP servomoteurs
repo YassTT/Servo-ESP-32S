@@ -1,100 +1,84 @@
-#include <ESP32Servo.h>
+#include <Servo.h>
 
-Servo servo;
-const int pinServo = 16;
+const int nbServos = 5;
+const int pinsServos[nbServos] = {3, 5, 6, 9, 10};
+Servo servos[nbServos];
 
-bool servoEnabled = true;
+const int pinButton = 2;
+bool previousButtonState = HIGH;
 bool cycleActive = false;
-
-unsigned long cycleStart = 0;
-unsigned long moveDuration = 1000;
-unsigned long pauseDuration = 2000;
+unsigned long lastActionTime = 0;
+unsigned long moveDuration = 1000; 
+unsigned long pauseDuration = 2000; 
+unsigned long cycleStartTime = 0;
 
 void setup() {
-  Serial.begin(9600);
-  delay(200);
-  servo.attach(pinServo, 500, 2400);
-  servo.write(0);
-  Serial.println("READY");
+  pinMode(pinButton, INPUT_PULLUP);
+
+
+  for (int i = 0; i < nbServos; i++) {
+    servos[i].attach(pinsServos[i]);
+    servos[i].write(0);
+  }
 }
 
 void loop() {
+  unsigned long currentMillis = millis();
+  bool buttonState = digitalRead(pinButton);
 
-  if (cycleActive) {
-    unsigned long t = millis() - cycleStart;
 
-    if (t < moveDuration) {
-      if (servoEnabled) servo.write(160);
-    }
-    else if (t < moveDuration + pauseDuration) {
-      if (servoEnabled) servo.write(0);
-    }
-    else {
-      cycleStart = millis();
+  if (buttonState == LOW && previousButtonState == HIGH) {
+    if (cycleActive) {
+
+      cycleActive = false;
+      resetServos();
+    } else {
+
+      cycleActive = true;
+      cycleStartTime = currentMillis;
+      moveServosTo180();
     }
   }
 
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-    handleCommand(cmd);
+
+  if (cycleActive) {
+
+    if (currentMillis - cycleStartTime >= moveDuration && currentMillis - cycleStartTime < moveDuration + 100) {
+      moveServosTo0();
+    }
+
+
+    if (currentMillis - cycleStartTime >= moveDuration + pauseDuration && currentMillis - cycleStartTime < moveDuration + pauseDuration + 100) {
+      moveServosTo180();
+    }
+
+
+    if (currentMillis - cycleStartTime >= moveDuration + pauseDuration * 2) {
+      cycleStartTime = currentMillis;
+    }
+  }
+
+  previousButtonState = buttonState;
+}
+
+
+void moveServosTo180() {
+  for (int i = 0; i < nbServos; i++) {
+    servos[i].write(180);
+    delay(100);
   }
 }
 
-void handleCommand(String cmd) {
 
-  if (cmd.startsWith("S0:")) {
-    cycleActive = false;
-
-    int angle = cmd.substring(3).toInt();
-    angle = constrain(angle, 0, 180);
-
-    if (servoEnabled) servo.write(angle);
-
-    Serial.print("ACK S0:");
-    Serial.println(angle);
-    return;
+void moveServosTo0() {
+  for (int i = 0; i < nbServos; i++) {
+    servos[i].write(0);
   }
+}
 
-  if (cmd == "STOP:0") {
-    cycleActive = false;
-    servoEnabled = false;
-    Serial.println("ACK STOP 0");
-    return;
+
+void resetServos() {
+  for (int i = 0; i < nbServos; i++) {
+    servos[i].write(0);
   }
-
-  if (cmd == "RUN:0") {
-    servoEnabled = true;
-    Serial.println("ACK RUN 0");
-    return;
-  }
-
-  if (cmd.startsWith("ALL:")) {
-    cycleActive = false;
-
-    int angle = cmd.substring(4).toInt();
-    angle = constrain(angle, 0, 180);
-
-    if (servoEnabled) servo.write(angle);
-
-    Serial.print("ACK ALL:");
-    Serial.println(angle);
-    return;
-  }
-
-  if (cmd == "CYCLE:ON") {
-    cycleActive = true;
-    cycleStart = millis();
-    Serial.println("ACK CYCLE ON");
-    return;
-  }
-
-  if (cmd == "CYCLE:OFF") {
-    cycleActive = false;
-    Serial.println("ACK CYCLE OFF");
-    return;
-  }
-
-  Serial.print("UNKNOWN: ");
-  Serial.println(cmd);
 }
