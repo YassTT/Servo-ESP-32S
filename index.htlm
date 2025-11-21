@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Servo GUI (Web Serial)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body {
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #eef2f3;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      justify-content: center;
+    }
+
+    .card {
+      background: #fff;
+      width: 100%;
+      max-width: 700px;
+      padding: 25px;
+      border-radius: 14px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+      animation: fadeIn 0.4s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 22px;
+      margin-bottom: 20px;
+      color: #333;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      margin-bottom: 22px;
+    }
+
+    button {
+      padding: 10px 18px;
+      border: none;
+      border-radius: 8px;
+      background: #4f8ef7;
+      color: white;
+      cursor: pointer;
+      font-size: 14px;
+      transition: 0.2s;
+    }
+
+    button:disabled {
+      background: #b5c7ea;
+      cursor: not-allowed;
+    }
+
+    button:hover:not(:disabled) {
+      background: #3d74d7;
+      transform: scale(1.04);
+    }
+
+    .row {
+      background: #f6f7fb;
+      padding: 14px;
+      border-radius: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+      border: 1px solid #e1e3ea;
+    }
+
+    .row label {
+      width: 80px;
+      font-weight: bold;
+      color: #444;
+    }
+
+    input[type=range] {
+      flex: 1;
+      appearance: none;
+      height: 6px;
+      border-radius: 3px;
+      background: #d7dbe8;
+      outline: none;
+    }
+
+    input[type=range]::-webkit-slider-thumb {
+      appearance: none;
+      width: 18px;
+      height: 18px;
+      background: #4f8ef7;
+      border-radius: 50%;
+      cursor: pointer;
+      transition: 0.15s;
+    }
+
+    input[type=range]::-webkit-slider-thumb:hover {
+      transform: scale(1.15);
+      background: #3d74d7;
+    }
+
+    .val {
+      width: 45px;
+      text-align: center;
+      font-size: 15px;
+      padding: 4px 0;
+    }
+
+    #log {
+      background: #1a1a1a;
+      color: #9be2ff;
+      padding: 10px;
+      height: 150px;
+      overflow-y: auto;
+      font-family: Consolas, monospace;
+      font-size: 13px;
+      border-radius: 8px;
+      margin-top: 18px;
+      border: 1px solid #333;
+    }
+  </style>
+</head>
+
+<body>
+<div class="card">
+  <h1>Contrôle Servo — WebSerial ESP32</h1>
+
+  <div class="controls">
+    <button id="btnConnect">Connecter</button>
+    <button id="btnDisconnect" disabled>Déconnecter</button>
+    <button id="btnCycleOn" disabled>Cycle ON</button>
+    <button id="btnCycleOff" disabled>Cycle OFF</button>
+    <button id="btnAll45" disabled>45°</button>
+  </div>
+
+  <div id="sliders"></div>
+
+  <h3 style="margin-top:25px;">Log Série</h3>
+  <div id="log"></div>
+</div>
+
+<script>
+  const NB_SERVOS = 1;
+  let port = null;
+  let writer = null;
+  let reader = null;
+  let keepReading = false;
+  let lastSent = [-1];
+  let sendThrottleTimer = null;
+
+  const logEl = document.getElementById('log');
+  function log(s){
+    const line = document.createElement('div');
+    line.textContent = s;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  const slidersDiv = document.getElementById('sliders');
+
+  const row = document.createElement('div');
+  row.className = 'row';
+
+  const label = document.createElement('label');
+  label.textContent = 'Servo 0';
+
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = 0;
+  input.max = 180;
+  input.value = 90;
+  input.dataset.index = 0;
+
+  const val = document.createElement('div');
+  val.className = 'val';
+  val.textContent = input.value;
+
+  input.addEventListener('input', e => {
+    val.textContent = e.target.value;
+    scheduleSend(0, e.target.value);
+  });
+
+  const btnStop = document.createElement('button');
+  btnStop.textContent = 'Stop';
+  btnStop.onclick = () => sendCommand(`STOP:0\n`);
+
+  const btnRun = document.createElement('button');
+  btnRun.textContent = 'Run';
+  btnRun.onclick = () => sendCommand(`RUN:0\n`);
+
+  row.appendChild(label);
+  row.appendChild(input);
+  row.appendChild(val);
+  row.appendChild(btnStop);
+  row.appendChild(btnRun);
+
+  slidersDiv.appendChild(row);
+
+  function scheduleSend(index, angle){
+    lastSent[index] = angle;
+    if (sendThrottleTimer) clearTimeout(sendThrottleTimer);
+    sendThrottleTimer = setTimeout(() => {
+      if (lastSent[0] !== -1){
+        sendCommand(`S0:${lastSent[0]}\n`);
+        lastSent[0] = -1;
+      }
+    }, 120);
+  }
+
+  async function connect(){
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 9600 });
+
+      await new Promise(r => setTimeout(r, 1200));
+
+      writer = port.writable.getWriter();
+      keepReading = true;
+      readLoop();
+
+      document.getElementById('btnConnect').disabled = true;
+      document.getElementById('btnDisconnect').disabled = false;
+      document.getElementById('btnCycleOn').disabled = false;
+      document.getElementById('btnCycleOff').disabled = false;
+      document.getElementById('btnAll45').disabled = false;
+
+      sendCommand(`S0:${input.value}\n`);
+
+    } catch(e){ log("ERREUR : " + e); }
+  }
+
+  async function disconnect(){
+    keepReading = false;
+    if (reader) { try{ await reader.cancel(); } catch(e){} reader = null; }
+    if (writer) { writer.releaseLock(); writer = null; }
+    if (port) { await port.close(); port = null; }
+
+    document.getElementById('btnConnect').disabled = false;
+    document.getElementById('btnDisconnect').disabled = true;
+    document.getElementById('btnCycleOn').disabled = true;
+    document.getElementById('btnCycleOff').disabled = true;
+    document.getElementById('btnAll45').disabled = true;
+
+    log("Déconnecté.");
+  }
+
+  async function readLoop(){
+    const textDecoder = new TextDecoderStream();
+    port.readable.pipeTo(textDecoder.writable);
+    reader = textDecoder.readable.getReader();
+    try {
+      while (keepReading) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) log(value.trim());
+      }
+    } catch(e){}
+    if (reader) reader.releaseLock();
+  }
+
+  async function sendCommand(str){
+    if (!port || !writer) return log("Non connecté");
+    const data = new TextEncoder().encode(str);
+    await writer.write(data);
+    log("> " + str.trim());
+  }
+
+  document.getElementById('btnConnect').onclick = connect;
+  document.getElementById('btnDisconnect').onclick = disconnect;
+  document.getElementById('btnCycleOn').onclick = () => sendCommand("CYCLE:ON\n");
+  document.getElementById('btnCycleOff').onclick = () => sendCommand("CYCLE:OFF\n");
+  document.getElementById('btnAll45').onclick = () => sendCommand("ALL:45\n");
+
+</script>
+</body>
+</html>
